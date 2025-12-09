@@ -36,7 +36,7 @@ jobs:
       with:
         name: Application-Binary
         path: candidate-binary
-    - uses: actions/upload-artifact@v3
+    - uses: actions/upload-0@v4
       with:
         name: Test-Results
         path: test-results
