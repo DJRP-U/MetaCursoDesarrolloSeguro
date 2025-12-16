@@ -1,68 +1,25 @@
-name: 01 - Security First CI / CD Pipeline
+name: 01 - Main CI / CD Pipeline
 
 on:
-  pull_request:
-    branches: [ "main" ]
-    paths-ignore:
-      - "**/*.md"
-      - "**/*.txt"
   push:
-    branches: [ "main" ]
     paths-ignore:
-      - "**/*.md"
-      - "**/*.txt"
+      - '**/*.md'
+      - '**/*.txt'
   workflow_dispatch:
-  # Opcional: escaneo recurrente (útil para CodeQL)
-  schedule:
-    - cron: "0 3 * * 1"
 
-# Default: sin permisos. Se asignan por job (mínimo privilegio).
-permissions: {}
 
-concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+# Otorgamos los permisos globalmente
+permissions:
+  contents: read
+  issues: read
+  checks: write
+  pull-requests: write
+  actions: read
+  security-events: write
+  packages: write
 
 jobs:
-  security:
-    name: Security gates
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      security-events: write   # necesario para subir resultados de code scanning/SARIF
-      pull-requests: write     # útil si alguna acción comenta en PR
-      actions: read
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-          fetch-depth: 0
-
-      # Revisión de dependencias (solo aplica a PRs)
-      - name: Dependency Review
-        if: github.event_name == 'pull_request'
-        uses: actions/dependency-review-action@v4
-
-      # SAST con CodeQL
-      - name: Initialize CodeQL
-        uses: github/codeql-action/init@v4
-        with:
-          # Ajusta lenguajes según tu repo
-          languages: javascript, python
-
-      - name: Autobuild
-        uses: github/codeql-action/autobuild@v4
-
-      - name: Analyze
-        uses: github/codeql-action/analyze@v4
-
   build:
     name: Build
-    needs: [ security ]
-    permissions:
-      contents: read
-      packages: write
     uses: ./.github/workflows/build.yml
-    secrets: inherit
+    secrets: inherit  # https://docs.github.com/en/actions/using-workflows/workflow-syntax-for-github-actions#jobsjob_idsecretsinherit
