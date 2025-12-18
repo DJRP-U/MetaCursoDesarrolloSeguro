@@ -3,12 +3,12 @@ name: 01 - Main CI / CD Pipeline
 on:
   push:
     paths-ignore:
-      - '**/*.md'
-      - '**/*.txt'
+      - "**/*.md"
+      - "**/*.txt"
   pull_request:
     paths-ignore:
-      - '**/*.md'
-      - '**/*.txt'
+      - "**/*.md"
+      - "**/*.txt"
   workflow_dispatch:
 
 permissions:
@@ -39,7 +39,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Si tu proyecto NO es Java/Kotlin, cambia languages y el build.
+      - name: Set up JDK 11
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "11"
+          cache: maven
+
       - name: Initialize CodeQL
         uses: github/codeql-action/init@v3
         with:
@@ -52,7 +58,6 @@ jobs:
       - name: Perform CodeQL Analysis (generate SARIF)
         uses: github/codeql-action/analyze@v3
         with:
-          # Guardar SARIF dentro del workspace para poder subirlo como artifact
           output: ${{ github.workspace }}/codeql-results
           category: codeql
 
@@ -61,6 +66,33 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: codeql-sarif
+          path: ${{ github.workspace }}/codeql-results/**/*.sarif
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: CodeQL summary (counts by severity)
+        if: always()
+        run: |
+          python - <<'PY'
+          import glob, json, os
+          out = ["### CodeQL - Resumen"]
+          files = glob.glob("codeql-results/**/*.sarif", recursive=True)
+          if not files:
+            out.append("- No se encontraron SARIF en codeql-results/**")
+          else:
+            sev = {"error":0,"warning":0,"note":0}
+            for f in files:
+              data = json.load(open(f, encoding="utf-8"))
+              for run in data.get("runs", []):
+                for r in run.get("results", []):
+                  lvl = (r.get("level") or "note").lower()
+                  if lvl not in sev: lvl = "note"
+                  sev[lvl] += 1
+            out.append(f"- error: {sev['error']}")
+            out.append(f"- warning: {sev['warning']}")
+            out.append(f"- note: {sev['note']}")
+          open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8").write("\n".join(out) + "\n")
+          PY
 
   zap-dast:
     name: OWASP ZAP (DAST)
@@ -71,22 +103,44 @@ jobs:
       issues: write
 
     env:
-      ZAP_TARGET_URL: ${{ vars.ZAP_TARGET_URL }}
+      APP_PORT: "8080"
+      ZAP_TARGET_URL: http://127.0.0.1:8080/
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Validate ZAP target
+      - name: Set up JDK 11
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "11"
+          cache: maven
+
+      - name: Build app (jar)
+        run: mvn -B -DskipTests clean package
+
+      - name: Start app (background)
         run: |
-          echo "ZAP_TARGET_URL=$ZAP_TARGET_URL"
-          if [ -z "$ZAP_TARGET_URL" ]; then
-            echo "ERROR: vars.ZAP_TARGET_URL está vacío"
-            exit 1
-          fi
-          case "$ZAP_TARGET_URL" in
-            http://*|https://*) ;;
-            *) echo "ERROR: el target debe iniciar con http:// o https://"; exit 1 ;;
-          esac
+          JAR="$(ls -1 target/*.jar | head -n 1)"
+          echo "Starting $JAR on port $APP_PORT"
+          nohup java -jar "$JAR" --server.port="$APP_PORT" > app.log 2>&1 &
+          echo $! > app.pid
+
+      - name: Wait until app is ready
+        run: |
+          set -e
+          for i in {1..60}; do
+            if curl -fsS "$ZAP_TARGET_URL" >/dev/null; then
+              echo "App OK: $ZAP_TARGET_URL"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "ERROR: la app no respondió en $ZAP_TARGET_URL"
+          echo "---- app.log ----"
+          tail -n 200 app.log || true
+          exit 1
 
       - name: ZAP Full Scan (debug log)
         uses: zaproxy/action-full-scan@v0.13.0
@@ -97,20 +151,29 @@ jobs:
           cmd_options: >-
             -d
             -j
-            -J report_json.json
-            -w report_md.md
-            -r report_html.html
+            -J zap_report.json
+            -w zap_report.md
+            -r zap_report.html
+            -x zap_report.xml
+
+      - name: Upload app log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-log
+          path: app.log
+          if-no-files-found: warn
+          retention-days: 14
 
       - name: Security findings summary (XSS/CSRF/SQLi/…)
         if: always()
         run: |
           python - <<'PY'
           import json, os
-
-          path = "report_json.json"
+          path = "zap_report.json"
           out = ["### OWASP ZAP - Hallazgos relevantes (XSS/CSRF/SQLi/…)"]
           if not os.path.exists(path):
-            out.append("- No se encontró report_json.json (revisa el artifact zap_dast).")
+            out.append("- No se encontró zap_report.json (revisa el artifact zap_dast).")
             open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8").write("\n".join(out) + "\n")
             raise SystemExit(0)
 
@@ -126,7 +189,12 @@ jobs:
               for v in o: walk(v)
           walk(data)
 
-          keys = ("xss","cross site scripting","csrf","sql injection","sqli","xxe","open redirect","path traversal","command injection")
+          keys = (
+            "xss","cross site scripting","csrf",
+            "sql injection","sqli","xxe",
+            "open redirect","path traversal","command injection"
+          )
+
           hits = []
           for a in alerts:
             name = (a.get("name") or a.get("alert") or "").strip()
@@ -135,13 +203,17 @@ jobs:
               hits.append((name, risk))
 
           if not hits:
-            out.append("- Sin coincidencias en este filtro. Revisa el reporte completo (artifact).")
+            out.append("- Sin coincidencias en este filtro. Revisa el reporte completo (artifact zap_dast).")
           else:
             for n, r in hits[:50]:
               out.append(f"- {n} — {r}")
 
           open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8").write("\n".join(out) + "\n")
           PY
-          path: ${{ github.workspace }}/codeql-results/**/*.sarif
-          if-no-files-found: warn
-          retention-days: 14
+
+      - name: Stop app
+        if: always()
+        run: |
+          if [ -f app.pid ]; then
+            kill "$(cat app.pid)" || true
+          fi
