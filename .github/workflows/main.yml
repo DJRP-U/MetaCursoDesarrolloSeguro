@@ -1,3 +1,31 @@
+name: 01 - Main CI / CD Pipeline
+
+on:
+  push:
+    paths-ignore:
+      - '**/*.md'
+      - '**/*.txt'
+  pull_request:
+    paths-ignore:
+      - '**/*.md'
+      - '**/*.txt'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: read
+  checks: write
+  pull-requests: write
+  actions: read
+  security-events: write
+  packages: write
+
+jobs:
+  build:
+    name: Build
+    uses: ./.github/workflows/build.yml
+    secrets: inherit
+
   codeql-analysis:
     name: CodeQL (SAST)
     runs-on: ubuntu-latest
@@ -10,6 +38,7 @@
       - name: Checkout
         uses: actions/checkout@v4
 
+      # Si tu proyecto NO es Java/Kotlin, cambia languages y el build.
       - name: Initialize CodeQL
         uses: github/codeql-action/init@v3
         with:
@@ -19,14 +48,14 @@
       - name: Build (instrumented for CodeQL)
         run: mvn -B -DskipTests clean package
 
-      - name: Perform CodeQL Analysis
+      - name: Perform CodeQL Analysis (generate SARIF)
         uses: github/codeql-action/analyze@v3
         with:
-          # Directorio donde se guardarán los SARIF (por defecto es ../results)
+          # Guardar SARIF dentro del workspace para poder subirlo como artifact
           output: ${{ github.workspace }}/codeql-results
           category: codeql
 
-      - name: Upload CodeQL SARIF report (artifact)
+      - name: Upload CodeQL report (SARIF artifact)
         if: always()
         uses: actions/upload-artifact@v4
         with:
