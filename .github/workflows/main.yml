@@ -5,10 +5,13 @@ on:
     paths-ignore:
       - '**/*.md'
       - '**/*.txt'
+  pull_request:
+    paths-ignore:
+      - '**/*.md'
+      - '**/*.txt'
   workflow_dispatch:
 
-
-# Otorgamos los permisos globalmente
+# Permisos globales (puedes dejarlos como ya los tienes)
 permissions:
   contents: read
   issues: read
@@ -22,4 +25,36 @@ jobs:
   build:
     name: Build
     uses: ./.github/workflows/build.yml
-    secrets: inherit  # https://docs.github.com/en/actions/using-workflows/workflow-syntax-for-github-actions#jobsjob_idsecretsinherit
+    secrets: inherit
+
+  codeql-analysis:
+    name: CodeQL (SAST)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+      security-events: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 11
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '11'
+          cache: maven
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: java-kotlin
+          queries: security-and-quality
+
+      # Para lenguajes compilados, CodeQL suele requerir observar el build (puedes ajustar el comando)
+      - name: Build (instrumented for CodeQL)
+        run: mvn -B -DskipTests clean package
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
