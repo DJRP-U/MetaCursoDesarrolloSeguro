@@ -1,112 +1,33 @@
-name: 01 - Main CI / CD Pipeline
-
-on:
-  push:
-    paths-ignore:
-      - '**/*.md'
-      - '**/*.txt'
-  pull_request:
-    paths-ignore:
-      - '**/*.md'
-      - '**/*.txt'
-  workflow_dispatch:
-
-permissions:
-  contents: read
-  issues: read
-  checks: write
-  pull-requests: write
-  actions: read
-  security-events: write
-  packages: write
-
-jobs:
-  build:
-    name: Build
-    uses: ./.github/workflows/build.yml
-    secrets: inherit
-
   zap-dast:
     name: OWASP ZAP (DAST)
     runs-on: ubuntu-latest
     needs: build
-    # El action mantiene alertas como Issue si tiene permisos (y si no es PR desde fork).
     permissions:
       contents: read
       issues: write
 
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+    env:
+      ZAP_TARGET_URL: ${{ vars.ZAP_TARGET_URL }}
 
-      # [No verificado] Define el target real:
-      # - opción A: URL de tu staging (recomendado)
-      # - opción B: levantar tu app dentro del job y escanear localhost
-      - name: ZAP Full Scan
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate ZAP target
+        run: |
+          echo "ZAP_TARGET_URL=$ZAP_TARGET_URL"
+          if [ -z "$ZAP_TARGET_URL" ]; then
+            echo "ERROR: vars.ZAP_TARGET_URL está vacío"
+            exit 1
+          fi
+          case "$ZAP_TARGET_URL" in
+            http://*|https://*) ;;
+            *) echo "ERROR: el target debe iniciar con http:// o https://"; exit 1 ;;
+          esac
+
+      - name: ZAP Full Scan (log en la salida del step)
         uses: zaproxy/action-full-scan@v0.13.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          target: ${{ vars.ZAP_TARGET_URL }}
+          target: ${{ env.ZAP_TARGET_URL }}
           artifact_name: zap_dast
-          # En PRs (especialmente desde forks) puede fallar la escritura de Issues.
-          allow_issue_writing: ${{ github.event_name != 'pull_request' }}
-          # Exporta reportes + debug log:
-          cmd_options: >-
-            -d
-            -r zap_report.html
-            -w zap_report.md
-            -x zap_report.xml
-            -J zap_report.json
-
-      - name: Resumen de hallazgos (XSS/CSRF/etc.) en Job Summary
-        if: always()
-        run: |
-          python - <<'PY'
-          import json, os
-
-          path = "zap_report.json"
-          if not os.path.exists(path):
-              open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8").write(
-                  "### OWASP ZAP - Hallazgos relevantes\n- No se encontró zap_report.json\n"
-              )
-              raise SystemExit(0)
-
-          data = json.load(open(path, encoding="utf-8"))
-          alerts = []
-
-          def walk(o):
-              if isinstance(o, dict):
-                  if isinstance(o.get("alerts"), list):
-                      for a in o["alerts"]:
-                          name = (a.get("name") or a.get("alert") or "").strip()
-                          risk = (a.get("riskdesc") or a.get("risk") or "").strip()
-                          if name:
-                              alerts.append((name, risk))
-                  for v in o.values():
-                      walk(v)
-              elif isinstance(o, list):
-                  for v in o:
-                      walk(v)
-
-          walk(data)
-
-          keys = (
-              "xss", "cross site scripting",
-              "csrf",
-              "sql injection", "sqli",
-              "command injection",
-              "path traversal",
-              "xxe",
-              "open redirect",
-          )
-          hits = [a for a in alerts if any(k in a[0].lower() for k in keys)]
-
-          out = ["### OWASP ZAP - Hallazgos relevantes (filtro: XSS/CSRF/SQLi/...)"]
-          if not hits:
-              out.append("- Sin coincidencias en este filtro. Revisa el reporte completo (artifact).")
-          else:
-              for name, risk in hits[:30]:
-                  out.append(f"- {name} — {risk}")
-
-          open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8").write("\n".join(out) + "\n")
-          PY
+          cmd_options: "-d -j"
