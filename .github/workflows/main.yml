@@ -1,3 +1,66 @@
+name: 01 - Main CI / CD Pipeline
+
+on:
+  push:
+    paths-ignore:
+      - '**/*.md'
+      - '**/*.txt'
+  pull_request:
+    paths-ignore:
+      - '**/*.md'
+      - '**/*.txt'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: read
+  checks: write
+  pull-requests: write
+  actions: read
+  security-events: write
+  packages: write
+
+jobs:
+  build:
+    name: Build
+    uses: ./.github/workflows/build.yml
+    secrets: inherit
+
+  codeql-analysis:
+    name: CodeQL (SAST)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+      security-events: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Si tu proyecto NO es Java/Kotlin, cambia languages y el build.
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: java-kotlin
+          queries: security-and-quality
+
+      - name: Build (instrumented for CodeQL)
+        run: mvn -B -DskipTests clean package
+
+      - name: Perform CodeQL Analysis (generate SARIF)
+        uses: github/codeql-action/analyze@v3
+        with:
+          # Guardar SARIF dentro del workspace para poder subirlo como artifact
+          output: ${{ github.workspace }}/codeql-results
+          category: codeql
+
+      - name: Upload CodeQL report (SARIF artifact)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: codeql-sarif
+
   zap-dast:
     name: OWASP ZAP (DAST)
     runs-on: ubuntu-latest
@@ -24,10 +87,60 @@
             *) echo "ERROR: el target debe iniciar con http:// o https://"; exit 1 ;;
           esac
 
-      - name: ZAP Full Scan (log en la salida del step)
+      - name: ZAP Full Scan (debug log)
         uses: zaproxy/action-full-scan@v0.13.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           target: ${{ env.ZAP_TARGET_URL }}
           artifact_name: zap_dast
-          cmd_options: "-d -j"
+          cmd_options: >-
+            -d
+            -j
+            -J report_json.json
+            -w report_md.md
+            -r report_html.html
+
+      - name: Security findings summary (XSS/CSRF/SQLi/…)
+        if: always()
+        run: |
+          python - <<'PY'
+          import json, os
+
+          path = "report_json.json"
+          out = ["### OWASP ZAP - Hallazgos relevantes (XSS/CSRF/SQLi/…)"]
+          if not os.path.exists(path):
+            out.append("- No se encontró report_json.json (revisa el artifact zap_dast).")
+            open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8").write("\n".join(out) + "\n")
+            raise SystemExit(0)
+
+          data = json.load(open(path, encoding="utf-8"))
+
+          alerts = []
+          def walk(o):
+            if isinstance(o, dict):
+              if isinstance(o.get("alerts"), list):
+                alerts.extend(o["alerts"])
+              for v in o.values(): walk(v)
+            elif isinstance(o, list):
+              for v in o: walk(v)
+          walk(data)
+
+          keys = ("xss","cross site scripting","csrf","sql injection","sqli","xxe","open redirect","path traversal","command injection")
+          hits = []
+          for a in alerts:
+            name = (a.get("name") or a.get("alert") or "").strip()
+            risk = (a.get("riskdesc") or a.get("risk") or "").strip()
+            if name and any(k in name.lower() for k in keys):
+              hits.append((name, risk))
+
+          if not hits:
+            out.append("- Sin coincidencias en este filtro. Revisa el reporte completo (artifact).")
+          else:
+            for n, r in hits[:50]:
+              out.append(f"- {n} — {r}")
+
+          open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8").write("\n".join(out) + "\n")
+          PY
+          path: ${{ github.workspace }}/codeql-results/**/*.sarif
+          if-no-files-found: warn
+          retention-days: 14
